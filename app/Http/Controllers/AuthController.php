@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Http; 
 use Illuminate\Support\Facades\DB; // Usaremos DB directamente
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
@@ -15,7 +16,10 @@ class AuthController extends BaseController
     public function register(Request $request)
     {
         // 1. Validamos los datos
+        $cedula = $request->cedula;
+
         $validator = Validator::make($request->all(), [
+            'cedula' => 'required|string|max:255',
             'username' => 'required|string|max:255',
             'password' => 'required|string|min:6'
         ]);
@@ -24,9 +28,19 @@ class AuthController extends BaseController
             return response()->json(['errors' => $validator->errors()], 422);
         }
 
+
+        $response = Http::get("http://localhost:3000/api/user/{$cedula}");
+        if($response->failed()) {
+            return response()->json(['error' => 'La cedula no existe'], 422);
+        }
+
+        $datosUsuario = $response->json();
+
+
         try {
             $userId = User::create([
-                'username' => $request->username,
+                'cedula' => $cedula,
+                'username' => $datosUsuario['nombre'],
                 'password' => Hash::make($request->password),
             ]);
 
