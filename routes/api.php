@@ -20,6 +20,7 @@ Route::middleware('auth:api')->get('/user', function (Request $request) {
 // Autenticación (Basado en la estructura de Cris)
 Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login', [AuthController::class, 'login']);
+Route::get('/verify-email', [AuthController::class, 'verifyEmail']);
 
 // Vehículos (ESTO ES EXACTAMENTE COMO LO TIENE CRIS)
 Route::get('/vehicles', [VehicleController::class, 'index']);

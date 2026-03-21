@@ -10,13 +10,18 @@ use Illuminate\Support\Facades\Validator;
 use Illuminate\Routing\Controller as BaseController;
 use Tymon\JWTAuth\Facades\JWTAuth;
 
+use App\Mail\VerifyUserAccount;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Str;
+
 class AuthController extends BaseController
 {
     public function register(Request $request)
     {
-        // 1. Validamos los datos
+        // 1. Validamos los datos (Usuario, Email y Password - TU PARTE)
         $validator = Validator::make($request->all(), [
-            'username' => 'required|string|max:255',
+            'username' => 'required|string|max:255|unique:users,username',
+            'email' => 'required|email|unique:users,email',
             'password' => 'required|string|min:6'
         ]);
 
@@ -25,20 +30,26 @@ class AuthController extends BaseController
         }
 
         try {
-            $userId = User::create([
+            // Creamos el usuario en estado PENDIENTE para ACTIVACIÓN POR CORREO
+            $user = User::create([
                 'username' => $request->username,
+                'email' => $request->email,
                 'password' => Hash::make($request->password),
+                'status' => 'pending',
+                'verification_token' => Str::random(64)
             ]);
 
+            // ENVIAMOS EL CORREO DE VERIFICACION (SENDGRID REAL)
+            Mail::to($user->email)->send(new VerifyUserAccount($user));
+
             return response()->json([
-                'message' => '¡Usuario registrado con éxito en MongoDB!',
-                'user_id' => $userId
+                'message' => '¡Usuario registrado! Revisa tu correo electrónico para activar tu cuenta.',
+                'user_id' => $user->_id
             ], 201);
 
         } catch (\Exception $e) {
-            // 3. Si algo sale mal con la conexión a Atlas, aquí lo veremos
             return response()->json([
-                'message' => 'Error de conexión con MongoDB Atlas',
+                'message' => 'Error al registrar usuario',
                 'error' => $e->getMessage()
             ], 500);
         }
@@ -49,27 +60,24 @@ class AuthController extends BaseController
         $credentials = $request->only('username', 'password');
 
         try {
-            \Log::info('Intento de login para usuario: ' . $credentials['username']);
-
             // 1. Buscamos al usuario
             $user = User::where('username', $credentials['username'])->first();
-            if ($user) {
-                \Log::info('Usuario encontrado. Tipo de password: ' . gettype($user->password));
-            } else {
-                \Log::info('Usuario no encontrado.');
-            }
 
-            // 2. Verificamos clave
+            // 2. Verificamos credenciales
             if (!$user || !Hash::check($credentials['password'], $user->password)) {
-                \Log::warning('Credenciales inválidas para: ' . $credentials['username']);
                 return response()->json(['error' => 'Credenciales inválidas'], 401);
             }
 
-            \Log::info('Clave verificada. Generando token...');
+            // 3. REQUERIMIENTO: Validar que la cuenta esté activa
+            if ($user->status !== 'active') {
+                return response()->json([
+                    'error' => 'Cuenta pendiente de activación',
+                    'message' => 'Por favor, revisa tu correo electrónico para activar tu cuenta.'
+                ], 403);
+            }
 
-            // 3. Generamos el token
+            // 4. Generamos el token JWT
             $token = JWTAuth::fromUser($user);
-            \Log::info('Token generado con éxito');
 
             return response()->json([
                 'message' => 'Login exitoso',
@@ -88,4 +96,30 @@ class AuthController extends BaseController
         }
     }
 
+    /**
+     * Endpoint para activar la cuenta mediante el token del correo
+     */
+    public function verifyEmail(Request $request)
+    {
+        $token = $request->query('token');
+
+        if (!$token) {
+            return response()->json(['message' => 'Token de verificación faltante'], 400);
+        }
+
+        $user = User::where('verification_token', $token)->first();
+
+        if (!$user) {
+            return response()->json(['message' => 'El enlace ya no es válido o ha expirado'], 404);
+        }
+
+        // ACTIVAMOS LA CUENTA
+        $user->status = 'active';
+        $user->verification_token = null; // Limpiamos el token por seguridad
+        $user->save();
+
+        return response()->json([
+            'message' => '¡Cuenta activada con éxito! Ya puedes iniciar sesión.',
+        ], 200);
+    }
 }
