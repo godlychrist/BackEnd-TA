@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Http; 
 use Illuminate\Support\Facades\DB; // Usaremos DB directamente
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
@@ -18,8 +19,9 @@ class AuthController extends BaseController
 {
     public function register(Request $request)
     {
-        // 1. Validamos los datos (Usuario, Email y Password - TU PARTE)
+        // 1. Validamos los datos (Integrando Cédula de Cris + Email de Brian)
         $validator = Validator::make($request->all(), [
+            'cedula' => 'required|string|max:255',
             'username' => 'required|string|max:255|unique:users,username',
             'email' => 'required|email|unique:users,email',
             'password' => 'required|string|min:6'
@@ -29,27 +31,36 @@ class AuthController extends BaseController
             return response()->json(['errors' => $validator->errors()], 422);
         }
 
+        // CODIGO DE CRIS: Validar con API de Identidad
+        $response = Http::get("http://localhost:3000/api/user/{$request->cedula}");
+        if($response->failed()) {
+            return response()->json(['error' => 'La cedula no existe en el padrón'], 422);
+        }
+
+        $datosUsuario = $response->json();
+
         try {
-            // Creamos el usuario en estado PENDIENTE para ACTIVACIÓN POR CORREO
+            // FUSION: Cédula y Nombre de Cris + Email y Activación de Brian
             $user = User::create([
-                'username' => $request->username,
+                'cedula' => $request->cedula,
+                'username' => $request->username, // O $datosUsuario['nombre'] si prefieren el legal
                 'email' => $request->email,
                 'password' => Hash::make($request->password),
                 'status' => 'pending',
                 'verification_token' => Str::random(64)
             ]);
 
-            // ENVIAMOS EL CORREO DE VERIFICACION (SENDGRID REAL)
+            // TU PARTE: Enviar correo real
             Mail::to($user->email)->send(new VerifyUserAccount($user));
 
             return response()->json([
-                'message' => '¡Usuario registrado! Revisa tu correo electrónico para activar tu cuenta.',
+                'message' => '¡Usuario registrado! Revisa tu correo real para activar tu cuenta.',
                 'user_id' => $user->_id
             ], 201);
 
         } catch (\Exception $e) {
             return response()->json([
-                'message' => 'Error al registrar usuario',
+                'message' => 'Error al registrar usuario integrado',
                 'error' => $e->getMessage()
             ], 500);
         }
