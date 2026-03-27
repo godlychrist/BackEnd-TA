@@ -21,6 +21,11 @@ Route::middleware('auth:api')->get('/user', function (Request $request) {
 Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login', [AuthController::class, 'login']);
 Route::get('/verify-email', [AuthController::class, 'verifyEmail']);
+Route::get('/check-cedula/{cedula}', [AuthController::class, 'checkCedula']);
+
+// Google OAuth (Flujo Manual por Requerimientos de Bladimir)
+Route::get('/auth/google', [AuthController::class, 'redirectToGoogle']);
+Route::get('/auth/google/callback', [AuthController::class, 'handleGoogleCallback']);
 
 // Vehículos (ESTO ES EXACTAMENTE COMO LO TIENE CRIS)
 Route::get('/vehicles', [VehicleController::class, 'index']);
