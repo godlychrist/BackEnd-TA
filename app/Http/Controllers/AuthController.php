@@ -4,7 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\User;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Http; 
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\DB; // Usaremos DB directamente
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
@@ -33,7 +33,7 @@ class AuthController extends BaseController
 
         // CODIGO DE CRIS: Validar con API de Identidad
         $response = Http::get("http://localhost:3000/api/user/{$request->cedula}");
-        if($response->failed()) {
+        if ($response->failed()) {
             return response()->json(['error' => 'La cedula no existe en el padrón'], 422);
         }
 
@@ -43,7 +43,8 @@ class AuthController extends BaseController
             // FUSION: Cédula y Nombre de Cris + Email y Activación de Brian
             $user = User::create([
                 'cedula' => $request->cedula,
-                'username' => $request->username, // O $datosUsuario['nombre'] si prefieren el legal
+                'full_name' => $datosUsuario['nombre'], // IDENTIDAD LEGAL DEL PADRÓN ✅
+                'username' => $request->username,
                 'email' => $request->email,
                 'password' => Hash::make($request->password),
                 'status' => 'pending',
@@ -132,5 +133,97 @@ class AuthController extends BaseController
         return response()->json([
             'message' => '¡Cuenta activada con éxito! Ya puedes iniciar sesión.',
         ], 200);
+    }
+
+    /**
+     * Paso 1: Generar el URL de Google
+     */
+    public function redirectToGoogle()
+    {
+        $query = http_build_query([
+            'client_id' => env('GOOGLE_CLIENT_ID'),
+            'redirect_uri' => env('GOOGLE_REDIRECT_URL'),
+            'response_type' => 'code',
+            'scope' => 'openid profile email',
+            'prompt' => 'select_account',
+        ]);
+
+        return response()->json([
+            'url' => "https://accounts.google.com/o/oauth2/v2/auth?{$query}"
+        ]);
+    }
+
+    /**
+     * Paso 2: Recibir la respuesta de Google
+     */
+    public function handleGoogleCallback(Request $request)
+    {
+        $code = $request->query('code');
+
+        if (!$code) {
+            return redirect(env('FRONTEND_URL') . '/login?error=no_code');
+        }
+
+        // 1. Intercambiamos el código por un token de acceso
+        $tokenResponse = Http::asForm()->post('https://oauth2.googleapis.com/token', [
+            'client_id' => env('GOOGLE_CLIENT_ID'),
+            'client_secret' => env('GOOGLE_CLIENT_SECRET'),
+            'redirect_uri' => env('GOOGLE_REDIRECT_URL'),
+            'code' => $code,
+            'grant_type' => 'authorization_code',
+        ]);
+
+        if ($tokenResponse->failed()) {
+            return redirect(env('FRONTEND_URL') . '/login?error=token_failed');
+        }
+
+        $accessToken = $tokenResponse->json()['access_token'];
+
+        // 2. Obtenemos la información real del usuario
+        $userResponse = Http::withToken($accessToken)->get('https://www.googleapis.com/oauth2/v3/userinfo');
+
+        if ($userResponse->failed()) {
+            return redirect(env('FRONTEND_URL') . '/login?error=user_info_failed');
+        }
+
+        $googleUser = $userResponse->json();
+        $email = $googleUser['email'];
+        $name = $googleUser['name'];
+
+        // 3. Verificamos si ya existe alguien con ese email
+        $user = User::where('email', $email)->first();
+
+        if ($user) {
+            // El usuario ya existe, lo logueamos directamente (¡Súper Rápido!)
+            $token = JWTAuth::fromUser($user);
+            return redirect(env('FRONTEND_URL') . "/login?token={$token}&username={$user->username}&id={$user->_id}");
+        } else {
+            // REQUERIMIENTO: Es usuario nuevo, debe dar la CÉDULA.
+            // Lo enviamos al registro con los datos pre-llenados.
+            $params = http_build_query([
+                'google_email' => $email,
+                'google_name' => $name,
+                'is_google' => 'true'
+            ]);
+            return redirect(env('FRONTEND_URL') . "/login?{$params}");
+        }
+    }
+
+    /**
+     * Autocompletar: Consultar cédula sin registrarse
+     */
+    public function checkCedula($cedula)
+    {
+        try {
+            $response = Http::get("http://localhost:3000/api/user/{$cedula}");
+
+            if ($response->failed()) {
+                return response()->json(['error' => 'Cédula no encontrada'], 404);
+            }
+
+            return response()->json($response->json());
+        } catch (\Exception $e) {
+            return response()->json(['error' => 'Error al conectar con el Padrón'], 500);
+        }
     }
 }
