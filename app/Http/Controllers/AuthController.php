@@ -5,7 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\DB; // Usaremos DB directamente
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Routing\Controller as BaseController;
@@ -24,6 +24,7 @@ class AuthController extends BaseController
             'cedula' => 'required|string|max:255',
             'username' => 'required|string|max:255|unique:users,username',
             'email' => 'required|email|unique:users,email',
+            'phone' => 'required|string|max:20', // REQUERIMIENTO: Teléfono para 2FA
             'password' => 'required|string|min:6'
         ]);
 
@@ -46,6 +47,7 @@ class AuthController extends BaseController
                 'full_name' => $datosUsuario['nombre'], // IDENTIDAD LEGAL DEL PADRÓN ✅
                 'username' => $request->username,
                 'email' => $request->email,
+                'phone' => $request->phone, // Guardamos el teléfono
                 'password' => Hash::make($request->password),
                 'status' => 'pending',
                 'verification_token' => Str::random(64)
@@ -88,16 +90,40 @@ class AuthController extends BaseController
                 ], 403);
             }
 
-            // 4. Generamos el token JWT
-            $token = JWTAuth::fromUser($user);
+            // --- 🔐 IMPLEMENTACIÓN 2FA REAL (Twilio) ---
+
+            // 1. Generamos código de 6 dígitos
+            $code = rand(100000, 999999);
+            $user->two_factor_code = (string) $code;
+            $user->save();
+
+            // 2. Enviamos el SMS REAL mediante Twilio
+            try {
+                $sid = env('TWILIO_SID');
+                $token = env('TWILIO_AUTH_TOKEN');
+                $serviceSid = env('TWILIO_SERVICE_SID');
+
+                $response = Http::withBasicAuth($sid, $token)
+                    ->asForm()
+                    ->post("https://api.twilio.com/2010-04-01/Accounts/{$sid}/Messages.json", [
+                        'To' => $user->phone,
+                        'MessagingServiceSid' => $serviceSid,
+                        'Body' => "Tu código de seguridad para TicoAutos es: {$code}. No lo compartas con nadie."
+                    ]);
+
+                if ($response->failed()) {
+                    \Log::error('Error de Twilio', ['response' => $response->json()]);
+                    // Opcional: podrías retornar el código en el log si falla el envío real para no trabar el desarrollo
+                }
+
+            } catch (\Exception $e) {
+                \Log::error('Fallo crítico enviando SMS', ['error' => $e->getMessage()]);
+            }
 
             return response()->json([
-                'message' => 'Login exitoso',
-                'token' => $token,
-                'user' => [
-                    'username' => $user->username,
-                    'id' => (string) $user->_id
-                ]
+                'requires_2fa' => true,
+                'message' => "Código de seguridad enviado a tu teléfono finalizado en " . substr($user->phone, -4),
+                'username' => $user->username
             ]);
 
         } catch (\Exception $e) {
@@ -106,6 +132,45 @@ class AuthController extends BaseController
                 'error' => $e->getMessage()
             ], 500);
         }
+    }
+
+    /**
+     * Paso 2 del Login: Verificar el código 2FA y dar el Token JWT.
+     */
+    public function verify2FA(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'username' => 'required|string',
+            'code' => 'required|string|size:6'
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 422);
+        }
+
+        $user = User::where('username', $request->username)
+            ->where('two_factor_code', $request->code)
+            ->first();
+
+        if (!$user) {
+            return response()->json(['error' => 'Código de verificación incorrecto'], 401);
+        }
+
+        // 1. Código correcto, limpiamos para el futuro
+        $user->two_factor_code = null;
+        $user->save();
+
+        // 2. Generamos el token JWT final
+        $token = JWTAuth::fromUser($user);
+
+        return response()->json([
+            'message' => 'Login exitoso (2FA validado)',
+            'token' => $token,
+            'user' => [
+                'username' => $user->username,
+                'id' => (string) $user->_id
+            ]
+        ]);
     }
 
     /**
