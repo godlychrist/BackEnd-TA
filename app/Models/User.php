@@ -20,8 +20,10 @@ class User extends Authenticatable implements JWTSubject
         'username',
         'password',
         'email',
+        'phone', // REQUERIMIENTO: Número de teléfono para 2FA
         'status',
         'verification_token',
+        'two_factor_code', // Código temporal para SMS
     ];
 
     public $timestamps = false;
@@ -29,6 +31,7 @@ class User extends Authenticatable implements JWTSubject
     protected $hidden = [
         'password',
         'remember_token',
+        'two_factor_code',
     ];
 
     public function getJWTIdentifier()
