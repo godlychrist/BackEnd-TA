@@ -20,7 +20,13 @@ Route::middleware('auth:api')->get('/user', function (Request $request) {
 // Autenticación (Basado en la estructura de Cris)
 Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login', [AuthController::class, 'login']);
+Route::post('/verify-2fa', [AuthController::class, 'verify2FA']);
 Route::get('/verify-email', [AuthController::class, 'verifyEmail']);
+Route::get('/check-cedula/{cedula}', [AuthController::class, 'checkCedula']);
+
+// Google OAuth (Flujo Manual por Requerimientos de Bladimir)
+Route::get('/auth/google', [AuthController::class, 'redirectToGoogle']);
+Route::get('/auth/google/callback', [AuthController::class, 'handleGoogleCallback']);
 
 // Vehículos (ESTO ES EXACTAMENTE COMO LO TIENE CRIS)
 Route::get('/vehicles', [VehicleController::class, 'index']);
@@ -30,9 +36,9 @@ Route::middleware('auth:api')->group(function () {
     Route::post('/vehicles', [VehicleController::class, 'createVehicle']);
     Route::put('/vehicles/{id}', [VehicleController::class, 'editVehicle']);
     Route::delete('/vehicles/{id}', [VehicleController::class, 'deleteVehicle']);
-    
+
     // Conversaciones
-    
+
     Route::post('/conversations', [MessageController::class, 'createConversation']);
     Route::get('/conversations', [MessageController::class, 'getConversations']);
     Route::get('/conversations/{id}', [MessageController::class, 'getConversation']);

@@ -4,8 +4,8 @@ namespace App\Http\Controllers;
 
 use App\Models\User;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Http; 
-use Illuminate\Support\Facades\DB; // Usaremos DB directamente
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Routing\Controller as BaseController;
@@ -24,6 +24,7 @@ class AuthController extends BaseController
             'cedula' => 'required|string|max:255',
             'username' => 'required|string|max:255|unique:users,username',
             'email' => 'required|email|unique:users,email',
+            'phone' => 'required|string|max:20', // REQUERIMIENTO: Teléfono para 2FA
             'password' => 'required|string|min:6'
         ]);
 
@@ -33,7 +34,7 @@ class AuthController extends BaseController
 
         // CODIGO DE CRIS: Validar con API de Identidad
         $response = Http::get("http://localhost:3000/api/user/{$request->cedula}");
-        if($response->failed()) {
+        if ($response->failed()) {
             return response()->json(['error' => 'La cedula no existe en el padrón'], 422);
         }
 
@@ -43,8 +44,10 @@ class AuthController extends BaseController
             // FUSION: Cédula y Nombre de Cris + Email y Activación de Brian
             $user = User::create([
                 'cedula' => $request->cedula,
-                'username' => $request->username, // O $datosUsuario['nombre'] si prefieren el legal
+                'full_name' => $datosUsuario['nombre'], // IDENTIDAD LEGAL DEL PADRÓN ✅
+                'username' => $request->username,
                 'email' => $request->email,
+                'phone' => $request->phone, // Guardamos el teléfono
                 'password' => Hash::make($request->password),
                 'status' => 'pending',
                 'verification_token' => Str::random(64)
@@ -87,16 +90,40 @@ class AuthController extends BaseController
                 ], 403);
             }
 
-            // 4. Generamos el token JWT
-            $token = JWTAuth::fromUser($user);
+            // --- 🔐 IMPLEMENTACIÓN 2FA REAL (Twilio) ---
+
+            // 1. Generamos código de 6 dígitos
+            $code = rand(100000, 999999);
+            $user->two_factor_code = (string) $code;
+            $user->save();
+
+            // 2. Enviamos el SMS REAL mediante Twilio
+            try {
+                $sid = env('TWILIO_SID');
+                $token = env('TWILIO_AUTH_TOKEN');
+                $serviceSid = env('TWILIO_SERVICE_SID');
+
+                $response = Http::withBasicAuth($sid, $token)
+                    ->asForm()
+                    ->post("https://api.twilio.com/2010-04-01/Accounts/{$sid}/Messages.json", [
+                        'To' => $user->phone,
+                        'MessagingServiceSid' => $serviceSid,
+                        'Body' => "Tu código de seguridad para TicoAutos es: {$code}. No lo compartas con nadie."
+                    ]);
+
+                if ($response->failed()) {
+                    \Log::error('Error de Twilio', ['response' => $response->json()]);
+                    // Opcional: podrías retornar el código en el log si falla el envío real para no trabar el desarrollo
+                }
+
+            } catch (\Exception $e) {
+                \Log::error('Fallo crítico enviando SMS', ['error' => $e->getMessage()]);
+            }
 
             return response()->json([
-                'message' => 'Login exitoso',
-                'token' => $token,
-                'user' => [
-                    'username' => $user->username,
-                    'id' => (string) $user->_id
-                ]
+                'requires_2fa' => true,
+                'message' => "Código de seguridad enviado a tu teléfono finalizado en " . substr($user->phone, -4),
+                'username' => $user->username
             ]);
 
         } catch (\Exception $e) {
@@ -105,6 +132,45 @@ class AuthController extends BaseController
                 'error' => $e->getMessage()
             ], 500);
         }
+    }
+
+    /**
+     * Paso 2 del Login: Verificar el código 2FA y dar el Token JWT.
+     */
+    public function verify2FA(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'username' => 'required|string',
+            'code' => 'required|string|size:6'
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 422);
+        }
+
+        $user = User::where('username', $request->username)
+            ->where('two_factor_code', $request->code)
+            ->first();
+
+        if (!$user) {
+            return response()->json(['error' => 'Código de verificación incorrecto'], 401);
+        }
+
+        // 1. Código correcto, limpiamos para el futuro
+        $user->two_factor_code = null;
+        $user->save();
+
+        // 2. Generamos el token JWT final
+        $token = JWTAuth::fromUser($user);
+
+        return response()->json([
+            'message' => 'Login exitoso (2FA validado)',
+            'token' => $token,
+            'user' => [
+                'username' => $user->username,
+                'id' => (string) $user->_id
+            ]
+        ]);
     }
 
     /**
@@ -132,5 +198,97 @@ class AuthController extends BaseController
         return response()->json([
             'message' => '¡Cuenta activada con éxito! Ya puedes iniciar sesión.',
         ], 200);
+    }
+
+    /**
+     * Paso 1: Generar el URL de Google
+     */
+    public function redirectToGoogle()
+    {
+        $query = http_build_query([
+            'client_id' => env('GOOGLE_CLIENT_ID'),
+            'redirect_uri' => env('GOOGLE_REDIRECT_URL'),
+            'response_type' => 'code',
+            'scope' => 'openid profile email',
+            'prompt' => 'select_account',
+        ]);
+
+        return response()->json([
+            'url' => "https://accounts.google.com/o/oauth2/v2/auth?{$query}"
+        ]);
+    }
+
+    /**
+     * Paso 2: Recibir la respuesta de Google
+     */
+    public function handleGoogleCallback(Request $request)
+    {
+        $code = $request->query('code');
+
+        if (!$code) {
+            return redirect(env('FRONTEND_URL') . '/login?error=no_code');
+        }
+
+        // 1. Intercambiamos el código por un token de acceso
+        $tokenResponse = Http::asForm()->post('https://oauth2.googleapis.com/token', [
+            'client_id' => env('GOOGLE_CLIENT_ID'),
+            'client_secret' => env('GOOGLE_CLIENT_SECRET'),
+            'redirect_uri' => env('GOOGLE_REDIRECT_URL'),
+            'code' => $code,
+            'grant_type' => 'authorization_code',
+        ]);
+
+        if ($tokenResponse->failed()) {
+            return redirect(env('FRONTEND_URL') . '/login?error=token_failed');
+        }
+
+        $accessToken = $tokenResponse->json()['access_token'];
+
+        // 2. Obtenemos la información real del usuario
+        $userResponse = Http::withToken($accessToken)->get('https://www.googleapis.com/oauth2/v3/userinfo');
+
+        if ($userResponse->failed()) {
+            return redirect(env('FRONTEND_URL') . '/login?error=user_info_failed');
+        }
+
+        $googleUser = $userResponse->json();
+        $email = $googleUser['email'];
+        $name = $googleUser['name'];
+
+        // 3. Verificamos si ya existe alguien con ese email
+        $user = User::where('email', $email)->first();
+
+        if ($user) {
+            // El usuario ya existe, lo logueamos directamente (¡Súper Rápido!)
+            $token = JWTAuth::fromUser($user);
+            return redirect(env('FRONTEND_URL') . "/login?token={$token}&username={$user->username}&id={$user->_id}");
+        } else {
+            // REQUERIMIENTO: Es usuario nuevo, debe dar la CÉDULA.
+            // Lo enviamos al registro con los datos pre-llenados.
+            $params = http_build_query([
+                'google_email' => $email,
+                'google_name' => $name,
+                'is_google' => 'true'
+            ]);
+            return redirect(env('FRONTEND_URL') . "/login?{$params}");
+        }
+    }
+
+    /**
+     * Autocompletar: Consultar cédula sin registrarse
+     */
+    public function checkCedula($cedula)
+    {
+        try {
+            $response = Http::get("http://localhost:3000/api/user/{$cedula}");
+
+            if ($response->failed()) {
+                return response()->json(['error' => 'Cédula no encontrada'], 404);
+            }
+
+            return response()->json($response->json());
+        } catch (\Exception $e) {
+            return response()->json(['error' => 'Error al conectar con el Padrón'], 500);
+        }
     }
 }
