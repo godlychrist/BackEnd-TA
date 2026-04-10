@@ -19,13 +19,13 @@ class AuthController extends BaseController
 {
     public function register(Request $request)
     {
-        // 1. Validamos los datos (Integrando Cédula de Cris + Email de Brian)
+        // 1. Validamos los datos (Integrando Cédula + Email)
         $validator = Validator::make($request->all(), [
             'cedula' => 'required|string|max:255',
             'username' => 'required|string|max:255|unique:users,username',
             'email' => 'required|email|unique:users,email',
-            'phone' => 'required|string|max:20', // REQUERIMIENTO: Teléfono para 2FA
-            'password' => 'required|string|min:6'
+            'phone' => $request->is_google ? 'nullable|string|max:20' : 'required|string|max:20',
+            'password' => $request->is_google ? 'nullable' : 'required|string|min:6'
         ]);
 
         if ($validator->fails()) {
@@ -41,29 +41,52 @@ class AuthController extends BaseController
         $datosUsuario = $response->json();
 
         try {
-            // FUSION: Cédula y Nombre de Cris + Email y Activación de Brian
+            $username = $request->username;
+
+            // Si es Google y el username ya existe, le agregamos algo aleatorio para no fallar
+            if ($request->is_google) {
+                while (User::where('username', $username)->exists()) {
+                    $username = $request->username . rand(10, 99);
+                }
+            }
+
+            // FUSION FINAL:
+            // Google -> Nace 'active', sin correo.
+            // Manual -> Nace 'pending', requiere correo de activación.
             $user = User::create([
                 'cedula' => $request->cedula,
-                'full_name' => $datosUsuario['nombre'], // IDENTIDAD LEGAL DEL PADRÓN ✅
-                'username' => $request->username,
+                'full_name' => $datosUsuario['nombre'], // IDENTIDAD LEGAL DEL PADRÓN
+                'username' => $username,
                 'email' => $request->email,
-                'phone' => $request->phone, // Guardamos el teléfono
-                'password' => Hash::make($request->password),
-                'status' => 'pending',
-                'verification_token' => Str::random(64)
+                'phone' => $request->phone ?? '',
+                'password' => Hash::make($request->password ?? Str::random(16)),
+                'status' => $request->is_google ? 'active' : 'pending',
+                'verification_token' => $request->is_google ? null : Str::random(64)
             ]);
 
-            // TU PARTE: Enviar correo real
-            Mail::to($user->email)->send(new VerifyUserAccount($user));
+            // Solo enviamos correo si NO es Google
+            if (!$request->is_google) {
+                Mail::to($user->email)->send(new VerifyUserAccount($user));
+            }
+
+            // REQUERIMIENTO: Si es Google, loguear de un solo
+            $jwtToken = $request->is_google ? JWTAuth::fromUser($user) : null;
 
             return response()->json([
-                'message' => '¡Usuario registrado! Revisa tu correo real para activar tu cuenta.',
+                'message' => $request->is_google
+                    ? '¡Bienvenido/a a TicoAutos!'
+                    : '¡Registro exitoso! Revisa tu correo para activar tu cuenta.',
+                'token' => $jwtToken, // Regresamos token si es Google
+                'user' => $request->is_google ? [
+                    'username' => $user->username,
+                    'id' => (string) $user->_id
+                ] : null,
                 'user_id' => $user->_id
             ], 201);
 
         } catch (\Exception $e) {
             return response()->json([
-                'message' => 'Error al registrar usuario integrado',
+                'message' => 'Error al registrar usuario',
                 'error' => $e->getMessage()
             ], 500);
         }
@@ -90,7 +113,7 @@ class AuthController extends BaseController
                 ], 403);
             }
 
-            // --- 🔐 IMPLEMENTACIÓN 2FA REAL (Twilio) ---
+            // ---  IMPLEMENTACIÓN 2FA REAL (Twilio) ---
 
             // 1. Generamos código de 6 dígitos
             $code = rand(100000, 999999);
@@ -178,7 +201,7 @@ class AuthController extends BaseController
      */
     public function verifyEmail(Request $request)
     {
-        $token = $request->query('token');
+        $token = $request->query('email_token');
 
         if (!$token) {
             return response()->json(['message' => 'Token de verificación faltante'], 400);
@@ -192,11 +215,35 @@ class AuthController extends BaseController
 
         // ACTIVAMOS LA CUENTA
         $user->status = 'active';
-        $user->verification_token = null; // Limpiamos el token por seguridad
+        $user->verification_token = null; 
         $user->save();
 
+        // --- ENVIAR SMS POST-ACTIVACIÓN (Usando lógica funcional del Login) ---
+        $code = rand(100000, 999999);
+        $user->two_factor_code = (string) $code;
+        $user->save();
+
+        try {
+            $sid = env('TWILIO_SID');
+            $token = env('TWILIO_AUTH_TOKEN');
+            $serviceSid = env('TWILIO_SERVICE_SID');
+
+            Http::withBasicAuth($sid, $token)
+                ->asForm()
+                ->post("https://api.twilio.com/2010-04-01/Accounts/{$sid}/Messages.json", [
+                    'To' => $user->phone,
+                    'MessagingServiceSid' => $serviceSid,
+                    'Body' => "TicoAutos: Tu cuenta ha sido activada. Tu código de acceso final es: {$code}"
+                ]);
+        } catch (\Exception $e) {
+            \Log::error('Fallo enviando SMS en activación', ['error' => $e->getMessage()]);
+        }
+
         return response()->json([
-            'message' => '¡Cuenta activada con éxito! Ya puedes iniciar sesión.',
+            'message' => '¡Correo verificado! Te hemos enviado un código SMS para finalizar la seguridad de tu cuenta.',
+            'requires_2fa' => true,
+            'user_id' => (string) $user->_id,
+            'username' => $user->username
         ], 200);
     }
 
