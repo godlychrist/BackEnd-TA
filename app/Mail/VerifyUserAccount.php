@@ -22,7 +22,7 @@ class VerifyUserAccount extends Mailable
     {
         $this->user = $user;
         // Link dinámico hacia tu Frontend (Vue) con el TOKEN del usuario
-        $this->url = env('FRONTEND_URL', 'http://localhost:8080') . '/verify-email?token=' . $user->verification_token;
+        $this->url = env('FRONTEND_URL', 'http://localhost:8080') . '/verify-email?email_token=' . $user->verification_token;
     }
 
     /**
