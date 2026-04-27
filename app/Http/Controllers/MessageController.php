@@ -23,6 +23,8 @@ public function store(Request $request)
         $createdAt = now();
         $updateData = [];
 
+        \Log::info('MENSAJE RECIBIDO PARA VALIDAR: ' . $request->message);
+
         $lastMessage = Message::where('conversation_id', (string) $request->conversation_id)
             ->orderBy('_id', 'desc')
             ->first();
@@ -32,6 +34,49 @@ public function store(Request $request)
                 'message' => 'Espera a que la otra persona responda!'
             ], 403);
         }
+
+        // 2. VALIDACIÓN CON OPENROUTER (Permite usar GPT, Claude, Llama, etc.)
+        $apiKey = config('services.openai.key');
+
+        if ($apiKey) {
+            try {
+                $response = \Illuminate\Support\Facades\Http::withHeaders([
+                    'Authorization' => 'Bearer ' . $apiKey,
+                    'Content-Type'  => 'application/json',
+                    'HTTP-Referer'  => 'http://localhost:8000', // Requerido por OpenRouter
+                    'X-Title'       => 'TicoAutos Chat Filter', // Requerido por OpenRouter
+                ])->post('https://openrouter.ai/api/v1/chat/completions', [
+                    'model' => 'openai/gpt-4o-mini', // Formato de modelo de OpenRouter
+                    'messages' => [
+                        [
+                            'role' => 'system',
+                            'content' => 'Eres un sistema de seguridad. Responde BLOQUEAR si hay datos de contacto (teléfonos, mails, redes sociales). Si es seguro di PERMITIR. Responde SOLO la palabra.'
+                        ],
+                        [
+                            'role' => 'user',
+                            'content' => $request->message
+                        ]
+                    ],
+                    'max_tokens' => 10,
+                    'temperature' => 0,
+                ]);
+
+                if ($response->successful()) {
+                    $result = trim($response->json('choices.0.message.content'));
+                    \Log::info('OpenRouter respondió: ' . $result);
+                    if (str_contains(strtoupper($result), 'BLOQUEAR')) {
+                        return response()->json([
+                            'message' => 'Seguridad: El sistema detectó información de contacto prohibida.'
+                        ], 403);
+                    }
+                } else {
+                    \Log::error('OpenRouter Error: ' . $response->body());
+                }
+            } catch (\Exception $e) {
+                \Log::error('Error crítico OpenRouter: ' . $e->getMessage());
+            }
+        }
+
 
         $message = Message::create([
             'conversation_id' => (string) $request->conversation_id,
@@ -144,4 +189,4 @@ public function store(Request $request)
 
         return response()->json($messages);
     }
-}
+}
