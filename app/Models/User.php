@@ -24,6 +24,7 @@ class User extends Authenticatable implements JWTSubject
         'status',
         'verification_token',
         'two_factor_code', // Código temporal para SMS
+        'phone_verified', // Estado de verificación de SMS (Una sola vez)
     ];
 
     public $timestamps = false;
