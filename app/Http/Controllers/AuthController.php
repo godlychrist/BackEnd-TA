@@ -61,6 +61,7 @@ class AuthController extends BaseController
                 'phone' => $request->phone ?? '',
                 'password' => Hash::make($request->password ?? Str::random(16)),
                 'status' => $request->is_google ? 'active' : 'pending',
+                'phone_verified' => $request->is_google ? true : false,
                 'verification_token' => $request->is_google ? null : Str::random(64)
             ]);
 
@@ -113,40 +114,48 @@ class AuthController extends BaseController
                 ], 403);
             }
 
-            // ---  IMPLEMENTACIÓN 2FA REAL (Twilio) ---
+            // 4. REQUERIMIENTO: Validar si necesita 2FA (Solo la primera vez)
+            if (!$user->phone_verified) {
+                // Generamos código de 6 dígitos
+                $code = rand(100000, 999999);
+                $user->two_factor_code = (string) $code;
+                $user->save();
 
-            // 1. Generamos código de 6 dígitos
-            $code = rand(100000, 999999);
-            $user->two_factor_code = (string) $code;
-            $user->save();
+                // Enviamos el SMS mediante Twilio
+                try {
+                    $sid = env('TWILIO_SID');
+                    $token = env('TWILIO_AUTH_TOKEN');
+                    $serviceSid = env('TWILIO_SERVICE_SID');
 
-            // 2. Enviamos el SMS REAL mediante Twilio
-            try {
-                $sid = env('TWILIO_SID');
-                $token = env('TWILIO_AUTH_TOKEN');
-                $serviceSid = env('TWILIO_SERVICE_SID');
+                    Http::withBasicAuth($sid, $token)
+                        ->asForm()
+                        ->post("https://api.twilio.com/2010-04-01/Accounts/{$sid}/Messages.json", [
+                            'To' => $user->phone,
+                            'MessagingServiceSid' => $serviceSid,
+                            'Body' => "Tu código de seguridad para TicoAutos es: {$code}. No lo compartas con nadie."
+                        ]);
 
-                $response = Http::withBasicAuth($sid, $token)
-                    ->asForm()
-                    ->post("https://api.twilio.com/2010-04-01/Accounts/{$sid}/Messages.json", [
-                        'To' => $user->phone,
-                        'MessagingServiceSid' => $serviceSid,
-                        'Body' => "Tu código de seguridad para TicoAutos es: {$code}. No lo compartas con nadie."
-                    ]);
-
-                if ($response->failed()) {
-                    \Log::error('Error de Twilio', ['response' => $response->json()]);
-                    // Opcional: podrías retornar el código en el log si falla el envío real para no trabar el desarrollo
+                } catch (\Exception $e) {
+                    \Log::error('Fallo crítico enviando SMS', ['error' => $e->getMessage()]);
                 }
 
-            } catch (\Exception $e) {
-                \Log::error('Fallo crítico enviando SMS', ['error' => $e->getMessage()]);
+                return response()->json([
+                    'requires_2fa' => true,
+                    'message' => "Código de seguridad enviado a tu teléfono finalizado en " . substr($user->phone, -4),
+                    'username' => $user->username
+                ]);
             }
 
+            // 5. LOGIN DIRECTO (Si ya está verificado)
+            $token = JWTAuth::fromUser($user);
+
             return response()->json([
-                'requires_2fa' => true,
-                'message' => "Código de seguridad enviado a tu teléfono finalizado en " . substr($user->phone, -4),
-                'username' => $user->username
+                'message' => 'Login exitoso',
+                'token' => $token,
+                'user' => [
+                    'username' => $user->username,
+                    'id' => (string) $user->_id
+                ]
             ]);
 
         } catch (\Exception $e) {
@@ -179,8 +188,9 @@ class AuthController extends BaseController
             return response()->json(['error' => 'Código de verificación incorrecto'], 401);
         }
 
-        // 1. Código correcto, limpiamos para el futuro
+        // 1. Código correcto, limpiamos para el futuro y marcamos como verificado
         $user->two_factor_code = null;
+        $user->phone_verified = true; // <--- EL CANDADO SE ABRE PARA SIEMPRE
         $user->save();
 
         // 2. Generamos el token JWT final
