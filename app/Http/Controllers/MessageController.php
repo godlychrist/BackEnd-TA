@@ -23,6 +23,8 @@ public function store(Request $request)
         $createdAt = now();
         $updateData = [];
 
+        \Log::info('MENSAJE RECIBIDO PARA VALIDAR: ' . $request->message);
+
         $lastMessage = Message::where('conversation_id', (string) $request->conversation_id)
             ->orderBy('_id', 'desc')
             ->first();
@@ -31,6 +33,53 @@ public function store(Request $request)
             return response()->json([
                 'message' => 'Espera a que la otra persona responda!'
             ], 403);
+        }
+
+        // VALIDACIÓN CON OPENAI (Usando config para mayor seguridad)
+        $apiKey = config('services.openai.key');
+        
+        // LOG DE DEPURACIÓN PARA VER QUÉ ESTÁ PASANDO
+        \Log::info('DEBUG: Valor de services.openai.key detectado: ' . ($apiKey ? 'LLAVE PRESENTE' : 'LLAVE NULA/VACÍA'));
+        \Log::info('DEBUG: Valor directo de env(OPENAI_API_KEY): ' . (env('OPENAI_API_KEY') ? 'PRESENTE' : 'NULO'));
+
+        if ($apiKey) {
+            try {
+                \Log::info('Llamando a OpenAI con la llave detectada...');
+                $response = \Illuminate\Support\Facades\Http::withHeaders([
+                    'Authorization' => 'Bearer ' . $apiKey,
+                    'Content-Type' => 'application/json',
+                ])->post('https://api.openai.com/v1/chat/completions', [
+                    'model' => 'gpt-4o-mini',
+                    'messages' => [
+                        [
+                            'role' => 'system',
+                            'content' => 'Eres un sistema de seguridad. Tu misión es decir BLOQUEAR si el mensaje contiene números de teléfono, correos o redes sociales. Si es seguro di PERMITIR. Responde SOLO la palabra.'
+                        ],
+                        [
+                            'role' => 'user',
+                            'content' => $request->message
+                        ]
+                    ],
+                    'max_tokens' => 10,
+                    'temperature' => 0,
+                ]);
+
+                if ($response->successful()) {
+                    $result = trim($response->json('choices.0.message.content'));
+                    \Log::info('OpenAI respondió: ' . $result);
+                    if (str_contains(strtoupper($result), 'BLOQUEAR')) {
+                        return response()->json([
+                            'message' => 'Seguridad: No se permite compartir información de contacto personal.'
+                        ], 403);
+                    }
+                } else {
+                    \Log::error('Error en respuesta de OpenAI: ' . $response->body());
+                }
+            } catch (\Exception $e) {
+                \Log::error('Error crítico OpenAI: ' . $e->getMessage());
+            }
+        } else {
+            \Log::warning('¡ALERTA! La API Key de OpenAI no se está leyendo. Revisa tu .env y reinicia el servidor.');
         }
 
         $message = Message::create([
@@ -144,4 +193,4 @@ public function store(Request $request)
 
         return response()->json($messages);
     }
-}
+}
