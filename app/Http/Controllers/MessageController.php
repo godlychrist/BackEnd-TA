@@ -35,25 +35,22 @@ public function store(Request $request)
             ], 403);
         }
 
-        // VALIDACIÓN CON OPENAI (Usando config para mayor seguridad)
+        // 2. VALIDACIÓN CON OPENROUTER (Permite usar GPT, Claude, Llama, etc.)
         $apiKey = config('services.openai.key');
-        
-        // LOG DE DEPURACIÓN PARA VER QUÉ ESTÁ PASANDO
-        \Log::info('DEBUG: Valor de services.openai.key detectado: ' . ($apiKey ? 'LLAVE PRESENTE' : 'LLAVE NULA/VACÍA'));
-        \Log::info('DEBUG: Valor directo de env(OPENAI_API_KEY): ' . (env('OPENAI_API_KEY') ? 'PRESENTE' : 'NULO'));
 
         if ($apiKey) {
             try {
-                \Log::info('Llamando a OpenAI con la llave detectada...');
                 $response = \Illuminate\Support\Facades\Http::withHeaders([
                     'Authorization' => 'Bearer ' . $apiKey,
-                    'Content-Type' => 'application/json',
-                ])->post('https://api.openai.com/v1/chat/completions', [
-                    'model' => 'gpt-4o-mini',
+                    'Content-Type'  => 'application/json',
+                    'HTTP-Referer'  => 'http://localhost:8000', // Requerido por OpenRouter
+                    'X-Title'       => 'TicoAutos Chat Filter', // Requerido por OpenRouter
+                ])->post('https://openrouter.ai/api/v1/chat/completions', [
+                    'model' => 'openai/gpt-4o-mini', // Formato de modelo de OpenRouter
                     'messages' => [
                         [
                             'role' => 'system',
-                            'content' => 'Eres un sistema de seguridad. Tu misión es decir BLOQUEAR si el mensaje contiene números de teléfono, correos o redes sociales. Si es seguro di PERMITIR. Responde SOLO la palabra.'
+                            'content' => 'Eres un sistema de seguridad. Responde BLOQUEAR si hay datos de contacto (teléfonos, mails, redes sociales). Si es seguro di PERMITIR. Responde SOLO la palabra.'
                         ],
                         [
                             'role' => 'user',
@@ -66,21 +63,20 @@ public function store(Request $request)
 
                 if ($response->successful()) {
                     $result = trim($response->json('choices.0.message.content'));
-                    \Log::info('OpenAI respondió: ' . $result);
+                    \Log::info('OpenRouter respondió: ' . $result);
                     if (str_contains(strtoupper($result), 'BLOQUEAR')) {
                         return response()->json([
-                            'message' => 'Seguridad: No se permite compartir información de contacto personal.'
+                            'message' => 'Seguridad: El sistema detectó información de contacto prohibida.'
                         ], 403);
                     }
                 } else {
-                    \Log::error('Error en respuesta de OpenAI: ' . $response->body());
+                    \Log::error('OpenRouter Error: ' . $response->body());
                 }
             } catch (\Exception $e) {
-                \Log::error('Error crítico OpenAI: ' . $e->getMessage());
+                \Log::error('Error crítico OpenRouter: ' . $e->getMessage());
             }
-        } else {
-            \Log::warning('¡ALERTA! La API Key de OpenAI no se está leyendo. Revisa tu .env y reinicia el servidor.');
         }
+
 
         $message = Message::create([
             'conversation_id' => (string) $request->conversation_id,
